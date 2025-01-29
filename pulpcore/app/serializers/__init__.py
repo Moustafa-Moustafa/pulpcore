@@ -87,6 +87,7 @@ from .publication import (
 )
 from .purge import PurgeSerializer
 from .repository import (
+    GenericRemoteSerializer,
     RemoteSerializer,
     RepositorySerializer,
     RepositorySyncURLSerializer,
@@ -113,6 +114,7 @@ from .user import (
     GroupRoleSerializer,
     GroupSerializer,
     GroupUserSerializer,
+    LoginSerializer,
     NestedRoleSerializer,
     RoleSerializer,
     UserRoleSerializer,

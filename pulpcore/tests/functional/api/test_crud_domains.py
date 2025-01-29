@@ -5,7 +5,6 @@ import random
 import string
 import json
 from pulpcore.client.pulpcore import ApiException
-from pulpcore.app import settings
 
 from pulpcore.tests.functional.utils import PulpTaskError
 
@@ -51,15 +50,16 @@ def test_crud_domains(pulpcore_bindings, monitor_task):
 
 
 @pytest.mark.parallel
-def test_default_domain(pulpcore_bindings):
+def test_default_domain(pulpcore_bindings, pulp_settings):
     """Test properties around the default domain."""
+    settings = pulp_settings
     domains = pulpcore_bindings.DomainsApi.list(name="default")
     assert domains.count == 1
 
     # Read the default domain, ensure storage is set to default
     default_domain = domains.results[0]
     assert default_domain.name == "default"
-    assert default_domain.storage_class == settings.DEFAULT_FILE_STORAGE
+    assert default_domain.storage_class == settings.STORAGES["default"]["BACKEND"]
     assert default_domain.redirect_to_object_storage == settings.REDIRECT_TO_OBJECT_STORAGE
     assert default_domain.hide_guarded_distributions == settings.HIDE_GUARDED_DISTRIBUTIONS
 
@@ -92,8 +92,9 @@ def test_default_domain(pulpcore_bindings):
 
 
 @pytest.mark.parallel
-def test_active_domain_deletion(pulpcore_bindings, monitor_task):
+def test_active_domain_deletion(pulpcore_bindings, monitor_task, pulp_settings):
     """Test trying to delete a domain that is in use, has objects in it."""
+    settings = pulp_settings
     if not settings.DOMAIN_ENABLED:
         pytest.skip("Domains not enabled")
     name = str(uuid.uuid4())
@@ -133,8 +134,10 @@ def test_orphan_domain_deletion(
     gen_object_with_cleanup,
     monitor_task,
     tmp_path,
+    pulp_settings,
 ):
     """Test trying to delete a domain that is in use, has objects in it."""
+    settings = pulp_settings
     if not settings.DOMAIN_ENABLED:
         pytest.skip("Domains not enabled")
     body = {
@@ -152,7 +155,7 @@ def test_orphan_domain_deletion(
     monitor_task(
         file_bindings.ContentFilesApi.create(
             relative_path=str(uuid.uuid4()),
-            file=new_file,
+            file=str(new_file),
             pulp_domain=domain.name,
             repository=repository.pulp_href,
         ).task
@@ -177,8 +180,9 @@ def test_orphan_domain_deletion(
 
 
 @pytest.mark.parallel
-def test_special_domain_creation(pulpcore_bindings, gen_object_with_cleanup):
+def test_special_domain_creation(pulpcore_bindings, gen_object_with_cleanup, pulp_settings):
     """Test many possible domain creation scenarios."""
+    settings = pulp_settings
     if not settings.DOMAIN_ENABLED:
         pytest.skip("Domains not enabled")
     # This test needs to account for which environment it is running in
@@ -277,11 +281,14 @@ def test_special_domain_creation(pulpcore_bindings, gen_object_with_cleanup):
         "storage_class": backend,
         "storage_settings": storage_settings[backend],
     }
-    with pytest.raises(ApiException) as e:
+    with pytest.raises((ApiException, ValueError)) as e:
         gen_object_with_cleanup(pulpcore_bindings.DomainsApi, body)
 
-    assert e.value.status == 400
-    assert "Ensure this field has no more than 50 characters." in e.value.body
+    if isinstance(e.value, ApiException):
+        assert e.value.status == 400
+        assert "Ensure this field has no more than 50 characters." in e.value.body
+    else:
+        assert "String should have at most 50 characters" in str(e.value)
 
     # Check that all domains are "apart" of the default domain
     domains = pulpcore_bindings.DomainsApi.list()

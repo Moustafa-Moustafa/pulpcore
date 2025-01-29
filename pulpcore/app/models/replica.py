@@ -1,8 +1,8 @@
 """
 Check `Plugin Writer's Guide`_ for more details.
 
-.. _Plugin Writer's Guide:
-    https://docs.pulpproject.org/pulpcore/plugins/plugin-writer/index.html
+Plugin Writer's Guide:
+https://pulpproject.org/pulpcore/docs/dev/learn/plugin-concepts/
 """
 
 from django.db import models
@@ -26,8 +26,6 @@ class UpstreamPulp(BaseModel, AutoAddObjPermsMixin):
     username = EncryptedTextField(null=True)
     password = EncryptedTextField(null=True)
 
-    # TODO: Remove this field in next breaking change release
-    pulp_label_select = models.TextField(null=True)
     q_select = models.TextField(null=True)
 
     last_replication = models.DateTimeField(null=True)
