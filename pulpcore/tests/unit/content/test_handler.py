@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 from datetime import datetime, timedelta, timezone
+=======
+from datetime import timedelta
+>>>>>>> main
 import pytest
 import uuid
 
@@ -437,7 +441,10 @@ def test_handle_checkpoint_arbitrary_ts(
         )
 
     redirect_location = excinfo.value.location
-    expected_location = f"{settings.CONTENT_PATH_PREFIX}{checkpoint_distribution.base_path}/{Handler._format_checkpoint_timestamp(checkpoint_publication_1.pulp_created)}/"
+    expected_location = (
+        f"{settings.CONTENT_PATH_PREFIX}{checkpoint_distribution.base_path}"
+        f"/{Handler._format_checkpoint_timestamp(checkpoint_publication_1.pulp_created)}/"
+    )
 
     assert (
         redirect_location == expected_location

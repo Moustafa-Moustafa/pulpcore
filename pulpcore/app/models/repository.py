@@ -328,7 +328,7 @@ class Repository(MasterModel):
             publication__pk__in=Distribution.objects.values_list("publication_id")
         )
 
-        # If the repository has a checkpoint distribution, protect versions with checkpoint publications
+        # Protect repo versions of distributed checkpoint publications.
         if Distribution.objects.filter(repository=self.pk, checkpoint=True).exists():
             qs |= self.versions.filter(
                 publication__pk__in=Publication.objects.filter(checkpoint=True).values_list(
