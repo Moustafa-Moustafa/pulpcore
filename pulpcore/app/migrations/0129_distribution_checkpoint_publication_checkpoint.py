@@ -6,18 +6,18 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('core', '0127_remove_upstreampulp_pulp_label_select'),
+        ("core", "0128_domain_pulp_labels"),
     ]
 
     operations = [
         migrations.AddField(
-            model_name='distribution',
-            name='checkpoint',
+            model_name="distribution",
+            name="checkpoint",
             field=models.BooleanField(default=False),
         ),
         migrations.AddField(
-            model_name='publication',
-            name='checkpoint',
+            model_name="publication",
+            name="checkpoint",
             field=models.BooleanField(default=False),
         ),
     ]
