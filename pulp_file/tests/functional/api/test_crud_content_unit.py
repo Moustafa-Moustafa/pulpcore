@@ -5,7 +5,7 @@ import os
 import pytest
 import uuid
 
-from pulpcore.tests.functional.utils import PulpTaskError
+from pulpcore.tests.functional.utils import generate_iso, PulpTaskError
 
 
 @pytest.mark.parallel
@@ -258,6 +258,7 @@ def test_create_file_from_url(
     file_bindings,
     file_repository_factory,
     file_remote_factory,
+    distribution_base_url,
     file_distribution_factory,
     basic_manifest_path,
     monitor_task,
@@ -269,7 +270,6 @@ def test_create_file_from_url(
     task = monitor_task(response.task)
     assert len(task.created_resources) == 1
     assert "api/v3/content/file/files/" in task.created_resources[0]
-
     # Set up
     repo1 = file_repository_factory(autopublish=True)
     body = {"remote": remote.pulp_href}
@@ -281,9 +281,89 @@ def test_create_file_from_url(
 
     # Test create w/ url for already existing content
     response = file_bindings.ContentFilesApi.create(
-        file_url=f"{distro.base_url}1.iso",
+        file_url=f"{distribution_base_url(distro.base_url)}1.iso",
         relative_path="1.iso",
     )
     task = monitor_task(response.task)
     assert len(task.created_resources) == 1
     assert task.created_resources[0] == content.pulp_href
+
+
+def _remove_artifact(file_path):
+    assert os.path.exists(file_path)
+    os.remove(file_path)
+    assert not os.path.exists(file_path)
+
+
+def _prep_iso(path, root):
+    file_path = path / str(uuid.uuid4())
+    iso_attrs = generate_iso(file_path)
+    iso_path = os.path.join(root, "artifact", iso_attrs["digest"][0:2], iso_attrs["digest"][2:])
+    return file_path, iso_attrs, iso_path
+
+
+@pytest.mark.parallel
+def test_reupload_damaged_artifact_atomic(
+    file_bindings,
+    file_repository_factory,
+    monitor_task,
+    pulp_settings,
+    tmp_path,
+):
+    if pulp_settings.STORAGES["default"]["BACKEND"] != "pulpcore.app.models.storage.FileSystem":
+        pytest.skip("this test only works for filesystem storage")
+    file_path, iso_attrs, iso_path = _prep_iso(tmp_path, pulp_settings.MEDIA_ROOT)
+
+    # Create a repo and add a file to it
+    repo = file_repository_factory(name=str(uuid.uuid4()))
+    create_attrs = {"file": str(file_path), "relative_path": "1.iso", "repository": repo.prn}
+    monitor_task(file_bindings.ContentFilesApi.create(**create_attrs).task)
+
+    # Delete the artifact-storage for that artifact
+    _remove_artifact(iso_path)
+
+    # Attempt atomic re-upload - expect success
+    monitor_task(file_bindings.ContentFilesApi.create(**create_attrs).task)
+    # Check presence of artifact
+    assert os.path.exists(iso_path)
+
+
+@pytest.mark.parallel
+def test_reupload_damaged_artifact_chunked(
+    file_bindings,
+    gen_object_with_cleanup,
+    monitor_task,
+    pulpcore_bindings,
+    pulp_settings,
+    tmp_path,
+):
+    if pulp_settings.STORAGES["default"]["BACKEND"] != "pulpcore.app.models.storage.FileSystem":
+        pytest.skip("this test only works for filesystem storage")
+    file_path, iso_attrs, iso_path = _prep_iso(tmp_path, pulp_settings.MEDIA_ROOT)
+
+    # Attempt chunked-upload - expect success
+    upload = gen_object_with_cleanup(pulpcore_bindings.UploadsApi, {"size": iso_attrs["size"]})
+
+    pulpcore_bindings.UploadsApi.update(
+        upload_href=upload.pulp_href,
+        file=str(file_path),
+        content_range=f"bytes 0-{iso_attrs['size']-1}/{iso_attrs['size']}",
+    )
+    response = file_bindings.ContentFilesApi.create(upload=upload.pulp_href, relative_path="1.iso")
+    monitor_task(response.task)
+    # Check presence of artifact
+    assert os.path.exists(iso_path)
+    # Delete the artifact-storage for that artifact
+    _remove_artifact(iso_path)
+
+    # Attempt a second timed - expect success
+    upload = gen_object_with_cleanup(pulpcore_bindings.UploadsApi, {"size": iso_attrs["size"]})
+    pulpcore_bindings.UploadsApi.update(
+        upload_href=upload.pulp_href,
+        file=str(file_path),
+        content_range=f"bytes 0-{iso_attrs['size']-1}/{iso_attrs['size']}",
+    )
+    response = file_bindings.ContentFilesApi.create(upload=upload.pulp_href, relative_path="1.iso")
+    monitor_task(response.task)
+    # Check presence of artifact
+    assert os.path.exists(iso_path)

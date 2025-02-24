@@ -2,6 +2,7 @@ import logging
 
 from django.db.models import Model
 from django.utils.dateparse import parse_datetime
+from urllib.parse import urljoin
 
 from pulp_glue.common.context import PulpContext
 from pulpcore.tasking.tasks import dispatch
@@ -103,6 +104,9 @@ class Replicator:
         ):
             return None
         url = self.url(upstream_distribution)
+        if url.startswith("/"):
+            url = urljoin(self.server.base_url, url)
+
         remote_fields_dict = {"url": url}
         remote_fields_dict.update(self.tls_settings)
         remote_fields_dict.update(self.remote_extra_fields(upstream_distribution))
@@ -117,6 +121,7 @@ class Replicator:
                 dispatch(
                     general_update,
                     task_group=self.task_group,
+                    shared_resources=[self.server],
                     exclusive_resources=[remote],
                     args=(remote.pk, self.app_label, self.remote_serializer_name),
                     kwargs={"data": remote_fields_dict, "partial": True},
@@ -142,6 +147,7 @@ class Replicator:
                 dispatch(
                     general_update,
                     task_group=self.task_group,
+                    shared_resources=[self.server],
                     exclusive_resources=[repository],
                     args=(repository.pk, self.app_label, self.repository_serializer_name),
                     kwargs={"data": repo_fields_dict, "partial": True},
@@ -175,7 +181,7 @@ class Replicator:
                 dispatch(
                     general_update,
                     task_group=self.task_group,
-                    shared_resources=[repository],
+                    shared_resources=[repository, self.server],
                     exclusive_resources=self.distros_uris,
                     args=(distro.pk, self.app_label, self.distribution_serializer_name),
                     kwargs={
@@ -189,7 +195,7 @@ class Replicator:
             dispatch(
                 general_create,
                 task_group=self.task_group,
-                shared_resources=[repository],
+                shared_resources=[repository, self.server],
                 exclusive_resources=self.distros_uris,
                 args=(self.app_label, self.distribution_serializer_name),
                 kwargs={"data": distribution_data},
@@ -213,7 +219,7 @@ class Replicator:
         dispatch(
             self.sync_task,
             task_group=self.task_group,
-            shared_resources=[remote],
+            shared_resources=[remote, self.server],
             exclusive_resources=[repository],
             kwargs=self.sync_params(repository, remote),
         )
@@ -231,6 +237,7 @@ class Replicator:
             dispatch(
                 general_multi_delete,
                 task_group=self.task_group,
+                shared_resources=[self.server],
                 exclusive_resources=self.distros_uris,
                 args=(distribution_ids,),
             )
@@ -256,6 +263,7 @@ class Replicator:
             dispatch(
                 general_multi_delete,
                 task_group=self.task_group,
+                shared_resources=[self.server],
                 exclusive_resources=repositories + remotes,
                 args=(repository_ids + remote_ids,),
             )

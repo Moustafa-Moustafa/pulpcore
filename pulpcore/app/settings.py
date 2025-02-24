@@ -58,11 +58,11 @@ MEDIA_ROOT = str(DEPLOY_ROOT / "media")  # Django 3.1 adds support for pathlib.P
 STATIC_URL = "/assets/"
 STATIC_ROOT = DEPLOY_ROOT / STATIC_URL.strip("/")
 
-# begin compatilibity layer for DEFAULT_FILE_STORAGE
+# begin compatibility layer for DEFAULT_FILE_STORAGE
 # Remove on pulpcore=3.85 or pulpcore=4.0
 
 # - What is this?
-# We shouldnt use STORAGES or DEFAULT_FILE_STORAGE directly because those are
+# We shouldn't use STORAGES or DEFAULT_FILE_STORAGE directly because those are
 # mutually exclusive by django, which constraints users to use whatever we use.
 # This is a hack/workaround to set Pulp's default while still enabling users to choose
 # the legacy or the new storage setting.
@@ -119,14 +119,6 @@ INSTALLED_APPS = [
     # pulp core app
     "pulpcore.app",
 ]
-
-# Enumerate the installed Pulp plugins during the loading process for use in the status API
-INSTALLED_PULP_PLUGINS = []
-
-for entry_point in entry_points(group="pulpcore.plugin"):
-    plugin_app_config = entry_point.load()
-    INSTALLED_PULP_PLUGINS.append(entry_point.name)
-    INSTALLED_APPS.append(plugin_app_config)
 
 # Optional apps that help with development, or augment Pulp in some non-critical way
 OPTIONAL_APPS = [
@@ -285,18 +277,22 @@ ACCESS_POLICIES = {}
 
 DRF_ACCESS_POLICY = {"reusable_conditions": ["pulpcore.app.global_access_conditions"]}
 
-# This is a sentinal value for deploy checks, since we don't want to set a default one.
-CONTENT_ORIGIN = "UNREACHABLE"
+CONTENT_ORIGIN = None
 CONTENT_PATH_PREFIX = "/pulp/content/"
 
 API_APP_TTL = 120  # The heartbeat is called from gunicorn notify (defaulting to 45 sec).
 CONTENT_APP_TTL = 30
 WORKER_TTL = 30
 
+# Seconds for a task to finish on semi graceful worker shutdown (approx)
+# On SIGHUP, SIGTERM the currently running task will be awaited forever.
+# On SIGINT, this value represents the time before the worker will attempt to kill the subprocess.
+TASK_GRACE_INTERVAL = 600
+
 # how long to protect ephemeral items in minutes
 ORPHAN_PROTECTION_TIME = 24 * 60
 
-# Custom cleaup intervals
+# Custom cleanup intervals
 # for the following, if set to 0, the corresponding cleanup task is disabled
 UPLOAD_PROTECTION_TIME = 0
 TASK_PROTECTION_TIME = 0
@@ -391,9 +387,17 @@ OTEL_ENABLED = False
 
 # HERE STARTS DYNACONF EXTENSION LOAD (Keep at the very bottom of settings.py)
 # Read more at https://www.dynaconf.com/django/
-from dynaconf import DjangoDynaconf, Validator  # noqa
+from dynaconf import DjangoDynaconf, Dynaconf, Validator  # noqa
 
 # Validators
+
+enabled_plugins_validator = Validator(
+    "ENABLED_PLUGINS",
+    is_type_of=list,
+    len_min=1,
+    when=Validator("ENABLED_PLUGINS", must_exist=True),
+)
+
 storage_keys = ("STORAGES.default.BACKEND", "DEFAULT_FILE_STORAGE")
 storage_validator = (
     Validator("REDIRECT_TO_OBJECT_STORAGE", eq=False)
@@ -494,24 +498,32 @@ settings = DjangoDynaconf(
     __name__,
     ENVVAR_PREFIX_FOR_DYNACONF="PULP",
     ENV_SWITCHER_FOR_DYNACONF="PULP_ENV",
-    PRELOAD_FOR_DYNACONF=[
-        "{}.app.settings".format(plugin_name) for plugin_name in INSTALLED_PULP_PLUGINS
-    ],
     ENVVAR_FOR_DYNACONF="PULP_SETTINGS",
     load_dotenv=False,
     validators=[
         api_root_validator,
         cache_validator,
+        enabled_plugins_validator,
         sha256_validator,
         storage_validator,
         unknown_algs_validator,
         json_header_auth_validator,
         authentication_json_header_openapi_security_scheme_validator,
     ],
-    post_hooks=otel_middleware_hook,
+    post_hooks=(otel_middleware_hook,),
 )
 
-# begin compatilibity layer for DEFAULT_FILE_STORAGE
+# Select enabled plugins and load their settings.
+enabled_plugins = settings.get("ENABLED_PLUGINS", None)
+for entry_point in entry_points(group="pulpcore.plugin"):
+    if enabled_plugins and entry_point.name not in enabled_plugins:
+        continue
+    if (plugin_app := entry_point.load()) not in settings.INSTALLED_APPS:
+        settings.load_file(f"{entry_point.module}.app.settings")
+        settings.INSTALLED_APPS += [plugin_app]
+INSTALLED_APPS = settings.INSTALLED_APPS
+
+# begin compatibility layer for DEFAULT_FILE_STORAGE
 # Remove on pulpcore=3.85 or pulpcore=4.0
 
 # Ensures the cached property storage.backends uses the the right value
@@ -553,7 +565,9 @@ if not (len(sys.argv) >= 2 and sys.argv[1] in _SKIPPED_COMMANDS_FOR_CONTENT_CHEC
         with connection.cursor() as cursor:
             for checksum in ALLOWED_CONTENT_CHECKSUMS:
                 # can't import Artifact here so use a direct db connection
-                cursor.execute(f"SELECT count(pulp_id) FROM core_artifact WHERE {checksum} IS NULL")
+                cursor.execute(
+                    f"SELECT count(pulp_id) FROM core_artifact WHERE {checksum} IS NULL LIMIT 1"
+                )
                 row = cursor.fetchone()
                 if row[0] > 0:
                     raise ImproperlyConfigured(
@@ -566,7 +580,7 @@ if not (len(sys.argv) >= 2 and sys.argv[1] in _SKIPPED_COMMANDS_FOR_CONTENT_CHEC
             for checksum in FORBIDDEN_CHECKSUMS:
                 # can't import Artifact here so use a direct db connection
                 cursor.execute(
-                    f"SELECT count(pulp_id) FROM core_artifact WHERE {checksum} IS NOT NULL"
+                    f"SELECT count(pulp_id) FROM core_artifact WHERE {checksum} IS NOT NULL LIMIT 1"
                 )
                 row = cursor.fetchone()
                 if row[0] > 0:
@@ -584,7 +598,7 @@ if not (len(sys.argv) >= 2 and sys.argv[1] in _SKIPPED_COMMANDS_FOR_CONTENT_CHEC
             cond = " AND ".join([f"{c} IS NULL" for c in ALLOWED_CONTENT_CHECKSUMS])
             cursor.execute(
                 f"SELECT count(pulp_id) FROM core_remoteartifact WHERE {cond} AND "
-                f"pulp_id NOT IN ({no_checksum_query})"
+                f"pulp_id NOT IN ({no_checksum_query}) LIMIT 1"
             )
             row = cursor.fetchone()
             if row[0] > 0:

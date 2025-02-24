@@ -308,3 +308,25 @@ def test_special_domain_creation(pulpcore_bindings, gen_object_with_cleanup, pul
     domain = gen_object_with_cleanup(pulpcore_bindings.DomainsApi, body, pulp_domain=random_name)
     assert "default/api/v3/" in domain.pulp_href
     assert random_name not in domain.pulp_href
+
+
+@pytest.mark.parallel
+def test_filter_domains_by_label(pulpcore_bindings, domain_factory):
+    """Test filtering domains by label."""
+    # Create domains with different labels
+    domain_a = domain_factory(pulp_labels={"key_a": "label_a"})
+    domain_b = domain_factory(pulp_labels={"key_b": "label_b"})
+
+    # Filter by label key
+    domains = pulpcore_bindings.DomainsApi.list(pulp_label_select="key_a").results
+    assert len(domains) == 1
+    assert domains[0].pulp_href == domain_a.pulp_href
+
+    # Filter by label value
+    domains = pulpcore_bindings.DomainsApi.list(pulp_label_select="key_b=label_b").results
+    assert len(domains) == 1
+    assert domains[0].pulp_href == domain_b.pulp_href
+
+    # Filter by non-existent label
+    domains = pulpcore_bindings.DomainsApi.list(pulp_label_select="key_c").results
+    assert len(domains) == 0
