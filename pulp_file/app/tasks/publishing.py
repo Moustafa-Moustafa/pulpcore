@@ -26,6 +26,7 @@ def publish(manifest, repository_version_pk, checkpoint=False):
     Args:
         manifest (str): Filename to use for manifest file.
         repository_version_pk (str): Create a publication from this repository version.
+        checkpoint (bool): Whether to create a checkpoint publication.
 
     """
     repo_version = RepositoryVersion.objects.get(pk=repository_version_pk)
