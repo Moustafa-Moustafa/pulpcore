@@ -132,10 +132,8 @@ class TestCheckpointDistribution:
 
         assert pub_2_response == pub_1_response
         lines = pub_1_response.strip().split("\n")
-        artifact_names = [line.split(",")[0] for line in lines]
-        assert len(artifact_names) == 2
-        assert "0" in artifact_names
-        assert "1" in artifact_names
+        artifact_names = {line.split(",")[0] for line in lines}
+        assert artifact_names == {"0", "1"}
 
     @pytest.mark.parallel
     def test_non_checkpoint_timestamp_is_redirected(self, setup, http_get, checkpoint_url):
