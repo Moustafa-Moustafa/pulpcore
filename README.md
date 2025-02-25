@@ -2,7 +2,7 @@
 **Acquire, Organize, and Distribute Software**
 
 Pulp is a platform for managing repositories of content, such as software
-packages, and pushing that content out to large numbers of consumers
+packages, and pushing that content out to large numbers of consumers.
 
 Using Pulp you can:
 - Locally mirror all or part of a repository

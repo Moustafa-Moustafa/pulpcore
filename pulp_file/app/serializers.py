@@ -115,7 +115,7 @@ class FilePublicationSerializer(PublicationSerializer):
         required=False,
         allow_null=True,
     )
-    checkpoint = serializers.BooleanField(default=False)
+    checkpoint = serializers.BooleanField(required=False)
 
     class Meta:
         model = FilePublication
