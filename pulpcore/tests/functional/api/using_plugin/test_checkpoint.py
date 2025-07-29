@@ -87,17 +87,24 @@ class TestCheckpointDistribution:
         assert Handler._format_checkpoint_timestamp(pubs[3].pulp_created) in checkpoints_ts
 
     @pytest.mark.parallel
-    def test_no_trailing_slash_is_redirected(self, setup, http_get, distribution_base_url):
+    def test_no_trailing_slash_is_redirected(self, setup, http_get, distribution_base_url, checkpoint_url):
         """Test checkpoint listing when path doesn't end with a slash."""
 
         pubs, distribution = setup
 
+        # Test a checkpoint distro listing path
         response = http_get(distribution_base_url(distribution.base_url[:-1])).decode("utf-8")
         checkpoints_ts = set(re.findall(r"\d{8}T\d{6}Z", response))
 
         assert len(checkpoints_ts) == 2
         assert Handler._format_checkpoint_timestamp(pubs[1].pulp_created) in checkpoints_ts
         assert Handler._format_checkpoint_timestamp(pubs[3].pulp_created) in checkpoints_ts
+
+        # Test a root checkpoint distro with a specific timestamp
+        pub_1_url = checkpoint_url(distribution, pubs[1].pulp_created)[:-1]
+        response = http_get(pub_1_url).decode("utf-8")
+
+        assert f"<h1>Index of {urlparse(pub_1_url).path}</h1>" in response
 
     @pytest.mark.parallel
     def test_exact_timestamp_is_served(self, setup, http_get, checkpoint_url):
