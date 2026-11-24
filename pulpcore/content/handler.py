@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 from gettext import gettext as _
+from urllib.parse import quote
 
 import django
 from aiohttp.client_exceptions import ClientConnectionError, ClientResponseError
@@ -46,7 +47,7 @@ from django.db import (  # noqa: E402
     models,
     transaction,
 )
-from django.db.models import Exists, OuterRef  # noqa: E402
+from django.db.models import Exists, OuterRef, Q  # noqa: E402
 from jinja2 import Template  # noqa: E402
 
 from pulpcore.app import mime_types  # noqa: E402
@@ -56,8 +57,12 @@ from pulpcore.app.models import (  # noqa: E402
     ContentArtifact,
     Distribution,
     Publication,
+    PublishedArtifact,
+    PublishedMetadata,
     Remote,
     RemoteArtifact,
+    RepositoryContent,
+    RepositoryVersion,
 )
 from pulpcore.app.storage_backends import signed_url  # noqa: E402
 from pulpcore.app.util import (  # noqa: E402
@@ -80,6 +85,9 @@ EDGE_CACHE_CONTROL = "public, max-age=0, must-revalidate"
 
 # Tell HTTP caches not to store redirects containing signed URLs.
 NO_STORE_EDGE_CACHE_CONTROL = "no-store"
+
+# A file of a checkpoint distribution, addressed by its sha256 instead of a checkpoint timestamp.
+CHECKPOINT_DIGEST_PATH_REGEX = re.compile(r"^sha256/(?P<digest>[0-9a-f]{64})/(?P<name>[^/]+)$")
 
 DIRECTORY_LISTING_TEMPLATE = Template(
     """
@@ -434,6 +442,7 @@ class Handler:
         Raises:
             PathNotResolved: when the path is invalid.
             CheckpointListings: when the path is the base path of a checkpoint distribution.
+            HTTPFound: when the path is a content file, to its digest-based path.
         """
         # Determine whether it's a listing or a specific checkpoint
         if path == "":
@@ -455,6 +464,13 @@ class Handler:
             if not checkpoint_publication:
                 raise PathNotResolved(path)
 
+            # Serve content files from one URL for all checkpoints, so HTTP caches keep one copy.
+            location = Handler._checkpoint_content_location(
+                distro, checkpoint_publication, rel_path
+            )
+            if location:
+                Handler._redirect_sub_path(location, redirect=HTTPFound)
+
             pub_timestamp_str = Handler._format_checkpoint_timestamp(
                 checkpoint_publication.pulp_created
             )
@@ -463,6 +479,111 @@ class Handler:
                 Handler._redirect_sub_path(f"{distro.base_path}/{pub_timestamp_str}/{rel_path}")
 
             return checkpoint_publication
+
+    @staticmethod
+    def _checkpoint_content_location(distro, publication, rel_path):
+        """
+        Get the digest-based path of a content file in a checkpoint publication.
+
+        Args:
+            distro (Distribution): The checkpoint distribution.
+            publication (Publication): The checkpoint publication.
+            rel_path (str): The path of the file in the publication.
+
+        Returns:
+            The path, or None when rel_path isn't a content file with an artifact.
+        """
+        if not rel_path or rel_path.endswith("/"):
+            return None
+
+        published_artifact = (
+            publication.published_artifact.select_related(
+                "content_artifact__artifact", "content_artifact__content"
+            )
+            .filter(relative_path=rel_path)
+            .first()
+        )
+        if published_artifact:
+            ca = published_artifact.content_artifact
+            # Metadata differs between checkpoints, so it keeps its timestamped path.
+            if ca.content.pulp_type == PublishedMetadata.get_pulp_type():
+                return None
+        elif publication.pass_through:
+            ca = (
+                ContentArtifact.objects.select_related("artifact")
+                .filter(
+                    Exists(
+                        publication.repository_version._content_relationships().filter(
+                            content_id=OuterRef("content_id")
+                        )
+                    ),
+                    relative_path=rel_path,
+                )
+                .first()
+            )
+        else:
+            return None
+
+        if ca is None or ca.artifact is None:
+            return None
+        name = quote(os.path.basename(rel_path), safe="!$&'()*+,;=:@~")
+        return f"{distro.base_path}/sha256/{ca.artifact.sha256}/{name}"
+
+    @staticmethod
+    def _find_checkpoint_content(distro, digest, name):
+        """
+        Find a content file that a checkpoint of the distribution serves under the given name.
+
+        Args:
+            distro (Distribution): The checkpoint distribution.
+            digest (str): The sha256 digest of the file.
+            name (str): The file name.
+
+        Returns:
+            The ContentArtifact of the file, or None when no checkpoint serves it.
+        """
+        checkpoints = Publication.objects.filter(
+            repository_version__repository_id=distro.repository_id, checkpoint=True
+        )
+        name_filter = Q(relative_path=name) | Q(relative_path__endswith=f"/{name}")
+
+        published_artifact = (
+            PublishedArtifact.objects.select_related(
+                "content_artifact__artifact", "content_artifact__artifact__pulp_domain"
+            )
+            .filter(
+                name_filter,
+                publication__in=checkpoints,
+                content_artifact__artifact__sha256=digest,
+                content_artifact__artifact__pulp_domain_id=distro.pulp_domain_id,
+            )
+            .exclude(content_artifact__content__pulp_type=PublishedMetadata.get_pulp_type())
+            .first()
+        )
+        if published_artifact:
+            return published_artifact.content_artifact
+
+        # Pass-through checkpoints also serve the content of their repository version.
+        in_version = RepositoryContent.objects.filter(
+            Q(version_removed__isnull=True) | Q(version_removed__number__gt=OuterRef("number")),
+            repository_id=distro.repository_id,
+            content_id=OuterRef(OuterRef("content_id")),
+            version_added__number__lte=OuterRef("number"),
+        )
+        pass_through_versions = RepositoryVersion.objects.filter(
+            Exists(in_version),
+            pk__in=checkpoints.filter(pass_through=True).values("repository_version_id"),
+        )
+        return (
+            ContentArtifact.objects.select_related("artifact", "artifact__pulp_domain")
+            .filter(
+                name_filter,
+                Exists(pass_through_versions),
+                artifact__sha256=digest,
+                artifact__pulp_domain_id=distro.pulp_domain_id,
+            )
+            .first()
+        )
 
     @staticmethod
     def _parse_checkpoint_path(path):
@@ -513,20 +634,21 @@ class Handler:
         return datetime.strftime(timestamp, CHECKPOINT_TS_FORMAT)
 
     @staticmethod
-    def _redirect_sub_path(path):
+    def _redirect_sub_path(path, redirect=HTTPMovedPermanently):
         """
         Redirect to the correct path based on whether domain is enabled.
 
         Args:
             path (str): The path component after the path prefix.
+            redirect (type): The redirect exception to raise.
 
         Raises:
-            HTTPMovedPermanently: to the correct path.
+            HTTPMovedPermanently: to the correct path, unless another redirect is given.
         """
         if settings.DOMAIN_ENABLED:
-            raise HTTPMovedPermanently(f"{settings.CONTENT_PATH_PREFIX}{get_domain().name}/{path}")
+            raise redirect(f"{settings.CONTENT_PATH_PREFIX}{get_domain().name}/{path}")
         else:
-            raise HTTPMovedPermanently(f"{settings.CONTENT_PATH_PREFIX}{path}")
+            raise redirect(f"{settings.CONTENT_PATH_PREFIX}{path}")
 
     @staticmethod
     def _permit(request, distribution):
@@ -833,6 +955,17 @@ class Handler:
                 return content_handler_result
 
         if distro.checkpoint:
+            if match := CHECKPOINT_DIGEST_PATH_REGEX.match(original_rel_path):
+                ca = await sync_to_async(self._find_checkpoint_content)(
+                    distro, match["digest"], match["name"]
+                )
+                if ca is None:
+                    raise PathNotResolved(path)
+                await self._set_last_modified_header(
+                    headers, last_modified=ca.artifact.pulp_created
+                )
+                return await self._serve_content_artifact(ca, headers, request)
+
             repository = repo_version = None
             publication = await sync_to_async(self._select_checkpoint_publication)(
                 distro, original_rel_path

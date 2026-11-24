@@ -133,3 +133,11 @@ Assuming the checkpoints from the above example, the below table show responses 
     </td>
   </tr>
 </table>
+
+### Accessing Files
+
+Content files, such as packages, are redirected (302) from a checkpoint to
+`<base_path>/sha256/<digest>/<file_name>`, where `<digest>` is the file's sha256 digest. A file has
+the same URL in every checkpoint, so HTTP caches store it only once. Only files that a checkpoint of
+the repository serves under that name are available at these URLs. Repository metadata is served
+from the checkpoint itself. Clients must follow redirects to download files from checkpoints.

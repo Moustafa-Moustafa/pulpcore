@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import make_mocked_request
-from aiohttp.web_exceptions import HTTPMovedPermanently
+from aiohttp.web_exceptions import HTTPFound, HTTPMovedPermanently
 from django.db import IntegrityError
 from django_guid import clear_guid, set_guid
 
@@ -704,6 +704,94 @@ def test_handle_checkpoint_before_first_ts(
     )
     with pytest.raises(PathNotResolved):
         Handler._select_checkpoint_publication(checkpoint_distribution, f"{request_ts}/")
+
+
+def _create_content_artifact(tmp_path, relative_path):
+    file = tmp_path / str(uuid.uuid4())
+    file.write_text(str(uuid.uuid4()))
+    artifact = Artifact.init_and_validate(str(file))
+    artifact.save()
+    return ContentArtifact.objects.create(
+        artifact=artifact, content=Content.objects.create(), relative_path=relative_path
+    )
+
+
+@pytest.mark.django_db
+def test_handle_checkpoint_content_redirect(
+    tmp_path,
+    checkpoint_distribution,
+    checkpoint_publication_1,
+    noncheckpoint_publication,
+):
+    """Content files of a checkpoint are redirected to their digest-based path."""
+    ca = _create_content_artifact(tmp_path, "f.deb")
+    PublishedArtifact.objects.create(
+        relative_path="pool/f.deb", content_artifact=ca, publication=checkpoint_publication_1
+    )
+    sha256 = ca.artifact.sha256
+    with pytest.raises(HTTPFound) as excinfo:
+        Handler._redirect_sub_path(
+            f"{checkpoint_distribution.base_path}/sha256/{sha256}/f.deb", redirect=HTTPFound
+        )
+    expected_location = excinfo.value.location
+
+    # Arbitrary timestamps are redirected to the digest-based path too
+    for created in (
+        checkpoint_publication_1.pulp_created,
+        checkpoint_publication_1.pulp_created + timedelta(seconds=1),
+    ):
+        request_ts = Handler._format_checkpoint_timestamp(created)
+        with pytest.raises(HTTPFound) as excinfo:
+            Handler._select_checkpoint_publication(
+                checkpoint_distribution, f"{request_ts}/pool/f.deb"
+            )
+        assert excinfo.value.location == expected_location
+
+    assert Handler._find_checkpoint_content(checkpoint_distribution, sha256, "f.deb") == ca
+    assert Handler._find_checkpoint_content(checkpoint_distribution, sha256, "g.deb") is None
+
+    # Files published only by non-checkpoint publications are not served
+    other_ca = _create_content_artifact(tmp_path, "g.deb")
+    PublishedArtifact.objects.create(
+        relative_path="pool/g.deb", content_artifact=other_ca, publication=noncheckpoint_publication
+    )
+    assert (
+        Handler._find_checkpoint_content(checkpoint_distribution, other_ca.artifact.sha256, "g.deb")
+        is None
+    )
+
+
+@pytest.mark.django_db
+def test_handle_checkpoint_pass_through_content(
+    tmp_path,
+    repo,
+    repo_version_1,
+    repo_version_2,
+    checkpoint_distribution,
+):
+    """Pass-through checkpoints serve the content of their repository version by digest."""
+    ca = _create_content_artifact(tmp_path, "dir/f.txt")
+    RepositoryContent.objects.create(
+        repository=repo,
+        content=ca.content,
+        version_added=repo_version_1,
+        version_removed=repo_version_2,
+    )
+    sha256 = ca.artifact.sha256
+
+    Publication.objects.create(
+        repository_version=repo_version_2, checkpoint=True, pass_through=True
+    )
+    assert Handler._find_checkpoint_content(checkpoint_distribution, sha256, "f.txt") is None
+
+    publication = Publication.objects.create(
+        repository_version=repo_version_1, checkpoint=True, pass_through=True
+    )
+    assert Handler._find_checkpoint_content(checkpoint_distribution, sha256, "f.txt") == ca
+
+    request_ts = Handler._format_checkpoint_timestamp(publication.pulp_created)
+    with pytest.raises(HTTPFound):
+        Handler._select_checkpoint_publication(checkpoint_distribution, f"{request_ts}/dir/f.txt")
 
 
 @pytest.mark.asyncio

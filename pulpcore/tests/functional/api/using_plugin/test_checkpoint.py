@@ -1,5 +1,6 @@
 """Tests for checkpoint distribution and publications."""
 
+import hashlib
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -7,6 +8,7 @@ from time import sleep
 from urllib.parse import urlparse
 
 import pytest
+import requests
 from aiohttp import ClientResponseError
 
 from pulpcore.client.pulp_file import exceptions
@@ -180,6 +182,37 @@ class TestCheckpointDistribution:
         lines = pub_1_response.strip().split("\n")
         artifact_names = {line.split(",")[0] for line in lines}
         assert artifact_names == {"0", "1"}
+
+    def test_content_file_is_redirected_to_digest_url(
+        self, setup, http_get, checkpoint_url, distribution_base_url
+    ):
+        pubs, distribution = setup
+        pub_1_url = checkpoint_url(distribution, pubs[1].pulp_created)
+        arbitrary_url = checkpoint_url(distribution, pubs[1].pulp_created + timedelta(seconds=1))
+        pub_3_url = checkpoint_url(distribution, pubs[3].pulp_created)
+        distro_base_url = distribution_base_url(distribution.base_url)
+
+        manifest = http_get(f"{pub_1_url}PULP_MANIFEST")
+        digest = dict(line.split(",")[:2] for line in manifest.decode("utf-8").split())["0"]
+        digest_url = f"{distro_base_url}sha256/{digest}/0"
+
+        # Every checkpoint redirects the same file to the same URL
+        for url in (pub_1_url, arbitrary_url, pub_3_url):
+            response = requests.get(f"{url}0", allow_redirects=False)
+            assert response.status_code == 302
+            assert response.headers["Location"] == urlparse(digest_url).path
+        assert hashlib.sha256(http_get(digest_url)).hexdigest() == digest
+
+        # Metadata is served from the checkpoint
+        response = requests.get(f"{pub_1_url}PULP_MANIFEST", allow_redirects=False)
+        assert response.status_code == 200
+
+        # Only files that a checkpoint serves under the requested name are found
+        manifest_digest = hashlib.sha256(manifest).hexdigest()
+        for path in (f"sha256/{digest}/1", f"sha256/{manifest_digest}/PULP_MANIFEST"):
+            with pytest.raises(ClientResponseError) as exc:
+                http_get(f"{distro_base_url}{path}")
+            assert exc.value.status == 404
 
     def test_non_checkpoint_timestamp_is_redirected(self, setup, http_get, checkpoint_url):
         pubs, distribution = setup
